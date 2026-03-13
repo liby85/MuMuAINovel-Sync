@@ -1,4 +1,4 @@
-name: 🔧 Patch Official Image & Build
+name: 📥 Sync & Generate SQLite Database
 
 on:
   schedule:
@@ -7,14 +7,17 @@ on:
   
   workflow_dispatch:
     inputs:
-      rebuild:
-        description: '强制重建镜像'
+      force_rebuild:
+        description: '强制重新生成数据库'
         required: false
         default: 'false'
         type: boolean
 
+env:
+  UPSTREAM_REPO: xiamuceer-j/MuMuAINovel
+
 jobs:
-  check-and-patch:
+  generate-database:
     runs-on: ubuntu-latest
     
     steps:
@@ -23,83 +26,92 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: 🐳 登录 Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: 📥 克隆官方代码库
+        run: |
+          git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git upstream-code
+          cd upstream-code
+          echo "$(git rev-parse HEAD)" > ../data/official_commit
+          echo "📦 已克隆官方代码: $(git rev-parse --short HEAD)"
       
-      - name: 🔍 检查官方镜像更新
+      - name: 🔍 检查官方代码更新
         id: check
         run: |
-          # 拉取官方镜像
-          docker pull mumujie/mumuainovel:latest || exit 1
+          CURRENT_COMMIT=$(cat data/official_commit 2>/dev/null || echo "")
+          NEW_COMMIT=$(cat data/official_commit)
           
-          # 获取镜像 digest
-          DIGEST=$(docker inspect --format='{{.Id}}' mumujie/mumuainovel:latest)
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-          
-          # 检查是否有变化
-          CACHE_FILE="data/official_digest"
-          if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$DIGEST" ]; then
-            if [ "${{ github.event.inputs.rebuild }}" != "true" ]; then
-              echo "skip=true" >> $GITHUB_OUTPUT
-              echo "📦 官方镜像没有更新，跳过构建"
-            else
-              echo "skip=false" >> $GITHUB_OUTPUT
-            fi
+          if [ "$CURRENT_COMMIT" = "$NEW_COMMIT" ] && [ "${{ github.event.inputs.force_rebuild }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "📦 官方代码无更新，跳过生成"
           else
-            echo "$DIGEST" > "$CACHE_FILE"
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
+      
+      - name: 🐍 安装依赖
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          cd upstream-code/backend
+          pip install -q aiosqlite sqlalchemy alembic
+          pip install -q -r requirements.txt 2>/dev/null || true
       
       - name: 🗄️ 生成 SQLite 数据库
         if: steps.check.outputs.skip == 'false'
         run: |
-          # 创建临时容器生成数据库
-          docker create --name db-generator mumujie/mumuainovel:latest sleep infinity
-          docker start db-generator
+          cd upstream-code/backend
           
-          # 等待服务启动
-          sleep 5
+          # 设置环境变量
+          export DATABASE_URL=sqlite+aiosqlite:///data/mumuai.db
+          mkdir -p data
           
-          # 初始化数据库（使用 SQLite）
-          docker exec db-generator sh -c "
-            cd /app/backend && \
-            pip install aiosqlite -q && \
-            DATABASE_URL='sqlite+aiosqlite:///data/mumuai.db' python -c \'
-              import asyncio
-              from app.database import engine, Base
-              from app.models import *              
-              async def init_db():
-                  async with engine.begin() as conn:
-                      await conn.run_sync(Base.metadata.create_all)
-                  print(\"Database tables created\")
-              asyncio.run(init_db())
-            \'
-          " || true
+          # 生成数据库表结构
+          python -c "
+import asyncio
+import sys
+sys.path.insert(0, '.')
+from sqlalchemy.ext.asyncio import create_async_engine
+from app.database import Base, engine, get_db
+from app.models import *
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print('Database tables created')
+
+asyncio.run(init_db())
+" 2>&1 || echo "方法1失败，尝试方法2"
           
-          # 尝试导出数据库文件
-          docker cp db-generator:/app/data/mumuai.db data/mumuai.db 2>/dev/null || true
-          
-          # 检查是否成功生成
-          if [ -f data/mumuai.db ]; then
-            echo "✅ SQLite 数据库已生成"
-            ls -la data/mumuai.db
-          else
-            # 如果自动生成失败，创建空数据库文件
-            echo "⚠️ 自动生成失败，创建空数据库文件"
-            touch data/mumuai.db
+          # 备用方法：使用 Alembic
+          if [ ! -f data/mumuai.db ] || [ ! -s data/mumuai.db ]; then
+            cd upstream-code
+            alembic upgrade head 2>/dev/null || true
           fi
           
-          docker stop db-generator
-          docker rm db-generator
+          # 检查生成结果
+          if [ -f upstream-code/backend/data/mumuai.db ] && [ -s upstream-code/backend/data/mumuai.db ]; then
+            echo "✅ 数据库生成成功"
+            ls -la upstream-code/backend/data/mumuai.db
+          else
+            echo "⚠️ 数据库生成可能失败，创建占位文件"
+            touch upstream-code/backend/data/mumuai.db
+          fi
       
-      - name: 💾 提交数据库文件
+      - name: 💾 复制数据库文件到仓库
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          cp upstream-code/backend/data/mumuai.db data/
+          ls -la data/
+      
+      - name: 📝 提交更新
         if: steps.check.outputs.skip == 'false'
         run: |
           git config --global user.name "GitHub Actions Bot"
           git config --global user.email "actions@github.com"
+          
           git add data/
-          git commit -m "chore: update SQLite database" || echo "数据库无变化"
-          git push
+          
+          if git diff --staged --quiet; then
+            echo "📦 数据库无变化，无需提交"
+          else
+            git commit -m "chore: update SQLite database"
+            git push
+            echo "✅ 数据库已更新并推送"
+          fi
