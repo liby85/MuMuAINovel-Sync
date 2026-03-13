@@ -2,7 +2,7 @@
 ARG BASE_IMAGE=mumujie/mumuainovel:latest
 FROM ${BASE_IMAGE}
 
-# 设置环境变量（使用官方变量名，与官方保持一致）
+# 设置环境变量
 ENV APP_PORT=7860
 ENV APP_HOST=0.0.0.0
 ENV DATABASE_URL=sqlite+aiosqlite:////data/mumuai.db
@@ -12,12 +12,23 @@ ENV LOCAL_AUTH_ENABLED=false
 COPY entrypoint-patch.sh /entrypoint-patch.sh
 RUN chmod +x /entrypoint-patch.sh
 
-# 复制预生成的 SQLite 数据库（官方路径：/data/）
-COPY data/mumuai.db /data/mumuai.db
-RUN chmod 666 /data/mumuai.db
+# 复制 alembic 配置和迁移脚本（用于生成数据库）
+COPY backend/alembic-sqlite.ini /app/backend/alembic-sqlite.ini
+COPY backend/alembic/sqlite /app/backend/alembic/sqlite
 
-# 复制官方代码版本记录
-COPY data/official_commit /data/official_commit
+# 运行 alembic 生成数据库
+RUN cd /app/backend && \
+    python -c "import os; os.makedirs('/data', exist_ok=True)" && \
+    alembic -c alembic-sqlite.ini upgrade head || true
 
-# 设置入口点，启动时应用补丁
+# 确保数据库文件存在
+RUN if [ -f /data/mumuai.db ]; then \
+        echo "✅ 数据库已生成" && \
+        chmod 666 /data/mumuai.db; \
+    else \
+        echo "⚠️ 数据库未生成，创建空文件" && \
+        touch /data/mumuai.db; \
+    fi
+
+# 设置入口点
 ENTRYPOINT ["/entrypoint-patch.sh"]
