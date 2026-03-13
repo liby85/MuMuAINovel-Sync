@@ -34,31 +34,74 @@ if [ -f "$AUTH_MIDDLEWARE" ]; then
 认证中间件 - 单用户模式
 """
 from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
 from app.logger import get_logger
 
 logger = get_logger(__name__)
 
-async def auth_middleware(request: Request, call_next):
-    """单用户模式中间件，始终注入固定用户身份"""
-    request.state.user_id = "single_user"
-    request.state.is_admin = True
-    logger.debug(f"单用户模式: user_id={request.state.user_id}, is_admin={request.state.is_admin}")
-    response = await call_next(request)
-    return response
+class AuthMiddleware(BaseHTTPMiddleware):
+    """认证中间件（单用户模式）"""
+    
+    async def dispatch(self, request: Request, call_next):
+        request.state.is_proxy_request = False
+        request.state.proxy_instance_id = None
+        request.state.user_id = "single_user"
+        request.state.user = None
+        request.state.is_admin = True
+        
+        response = await call_next(request)
+        return response
 EOF
     echo "✅ 认证中间件已修改"
+else
+    echo "⚠️ 警告: 认证中间件文件不存在 - $AUTH_MIDDLEWARE"
+    # 尝试其他可能的路径
+    for alt_path in "/app/backend/middleware/auth_middleware.py" "/app/app/middleware/auth_middleware.py"; do
+        if [ -f "$alt_path" ]; then
+            echo "   找到替代路径: $alt_path"
+            AUTH_MIDDLEWARE="$alt_path"
+            cat > "$AUTH_MIDDLEWARE" << 'EOF'
+"""
+认证中间件 - 单用户模式
+"""
+from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
+from app.logger import get_logger
+
+logger = get_logger(__name__)
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request.state.is_proxy_request = False
+        request.state.proxy_instance_id = None
+        request.state.user_id = "single_user"
+        request.state.user = None
+        request.state.is_admin = True
+        response = await call_next(request)
+        return response
+EOF
+            echo "✅ 认证中间件已修改 (替代路径)"
+            break
+        fi
+    done
 fi
 
 # ===== 3. 添加 get_single_user_id 函数 =====
 DATABASE_PY="/app/backend/app/database.py"
-if [ -f "$DATABASE_PY" ] && ! grep -q "def get_single_user_id" "$DATABASE_PY"; then
-    cat >> "$DATABASE_PY" << 'EOF'
+if [ -f "$DATABASE_PY" ]; then
+    if ! grep -q "def get_single_user_id" "$DATABASE_PY"; then
+        cat >> "$DATABASE_PY" << 'EOF'
 
 def get_single_user_id() -> str:
     """返回单用户模式下的固定用户ID"""
     return "single_user"
 EOF
-    echo "✅ 数据库模块已更新"
+        echo "✅ 数据库模块已更新"
+    else
+        echo "ℹ️ get_single_user_id 已存在"
+    fi
+else
+    echo "⚠️ 警告: 数据库模块文件不存在"
 fi
 
 # ===== 4. 简化认证 API =====
@@ -72,26 +115,52 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 
-router = APIRouter(tags=["认证"])
+router = APIRouter(prefix="/auth", tags=["认证"])
 
 @router.get("/health")
-async def health_check(db: AsyncSession = Depends(get_db)):
+async def health_check():
     """健康检查端点"""
     return {"status": "healthy", "message": "单用户模式运行中"}
 EOF
     echo "✅ 认证 API 已简化"
+else
+    echo "⚠️ 警告: 认证 API 文件不存在 - $AUTH_API"
 fi
 
-# ===== 5. 修改配置文件 =====
+# ===== 5. 简化用户 API (users.py) =====
+USERS_API="/app/backend/app/api/users.py"
+if [ -f "$USERS_API" ]; then
+    # 保留获取当前用户的功能，但让其返回默认用户
+    sed -i 's/def get_current_user/def _disabled_get_current_user/g' "$USERS_API" 2>/dev/null || true
+    sed -i 's/@router.get("\/me")/@router.get("\/me", deprecated=True)/g' "$USERS_API" 2>/dev/null || true
+    echo "✅ 用户 API 已处理"
+else
+    echo "ℹ️ 用户 API 文件不存在 (可选)"
+fi
+
+# ===== 6. 修改配置文件 =====
 CONFIG_PY="/app/backend/app/config.py"
 if [ -f "$CONFIG_PY" ]; then
     sed -i 's/LOCAL_AUTH_ENABLED = True/LOCAL_AUTH_ENABLED = False/g' "$CONFIG_PY" 2>/dev/null || true
     sed -i 's/LOCAL_AUTH_ENABLED = true/LOCAL_AUTH_ENABLED = False/g' "$CONFIG_PY" 2>/dev/null || true
     sed -i 's/SESSION_EXPIRE_MINUTES = [0-9]*/SESSION_EXPIRE_MINUTES = 999999/g' "$CONFIG_PY" 2>/dev/null || true
+    # 确保数据库配置正确
+    sed -i "s|DATABASE_URL =.*|DATABASE_URL = 'sqlite+aiosqlite:///data/mumuai.db'|g" "$CONFIG_PY" 2>/dev/null || true
     echo "✅ 配置文件已更新"
+else
+    echo "⚠️ 警告: 配置文件不存在"
 fi
 
-# ===== 6. 修改启动脚本 =====
+# ===== 7. 禁用用户管理器 =====
+USER_MANAGER="/app/backend/app/user_manager.py"
+if [ -f "$USER_MANAGER" ]; then
+    # 注释掉登录相关函数
+    sed -i 's/def authenticate/def _disabled_authenticate/g' "$USER_MANAGER" 2>/dev/null || true
+    sed -i 's/def login/def _disabled_login/g' "$USER_MANAGER" 2>/dev/null || true
+    echo "✅ 用户管理器已处理"
+fi
+
+# ===== 8. 修改启动脚本 =====
 ENTRYPOINT_SH="/app/backend/scripts/entrypoint.sh"
 if [ -f "$ENTRYPOINT_SH" ]; then
     sed -i '/等待数据库/d' "$ENTRYPOINT_SH" 2>/dev/null || true
@@ -101,19 +170,22 @@ if [ -f "$ENTRYPOINT_SH" ]; then
     echo "✅ 启动脚本已更新"
 fi
 
-# ===== 7. 前端修改（移除登录相关）=====
+# ===== 9. 前端修改（移除登录相关）=====
 FRONTEND_DIR="/app/frontend/dist"
 if [ -d "$FRONTEND_DIR" ]; then
     rm -rf "$FRONTEND_DIR/login" 2>/dev/null || true
     rm -f "$FRONTEND_DIR/login.html" 2>/dev/null || true
+    rm -rf "$FRONTEND_DIR/auth" 2>/dev/null || true
     if [ -f "$FRONTEND_DIR/index.html" ]; then
         sed -i 's|"/login"|"/"|g' "$FRONTEND_DIR/index.html" 2>/dev/null || true
     fi
     echo "✅ 前端已更新"
+else
+    echo "ℹ️ 前端目录不存在 (可选)"
 fi
 
 echo "✅ 所有补丁已应用完成！"
 echo "🚀 启动应用 (端口: $APP_PORT)..."
 
-# 执行原始命令（会使用环境变量 APP_HOST, APP_PORT）
+# 执行原始命令
 exec "$@"
