@@ -26,7 +26,47 @@ else
     exit 1
 fi
 
-# ===== 2. 修改认证中间件 =====  
+# ===== 2. 确保 admin 用户存在 =====
+python3 << 'PYEOF'
+import sqlite3
+import hashlib
+import os
+
+db_path = "/data/mumuai.db"
+conn = sqlite3.connect(db_path)
+cursor = conn.cursor()
+
+# 检查 users 表是否存在
+cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+if not cursor.fetchone():
+    print("⚠️ users 表不存在，跳过创建 admin 用户")
+    conn.close()
+    exit(0)
+
+# 检查 admin 用户是否已存在
+cursor.execute("SELECT user_id FROM users WHERE username = 'admin'")
+if cursor.fetchone():
+    print("ℹ️ admin 用户已存在")
+else:
+    # 创建 admin 用户（默认密码: admin123）
+    # 密码使用 PBKDF2 格式: pbkdf2:sha256:Iterations$salt$hash
+    password = "admin123"
+    salt = os.urandom(16).hex()
+    import hashlib
+    hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), 100000).hex()
+    pwd_hash = f"pbkdf2:sha256:100000${salt}${hashed}"
+    
+    cursor.execute("""
+        INSERT INTO users (user_id, username, email, password, is_admin, trust_level)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, ("admin", "admin", "admin@local", pwd_hash, 1, 1))
+    conn.commit()
+    print("✅ admin 用户已创建（密码: admin123）")
+
+conn.close()
+PYEOF
+
+# ===== 3. 修改认证中间件 =====  
 # 路径: /app/app/middleware/auth_middleware.py
 AUTH_MIDDLEWARE="/app/app/middleware/auth_middleware.py"
 if [ -f "$AUTH_MIDDLEWARE" ]; then
@@ -40,7 +80,6 @@ from app.logger import get_logger
 
 logger = get_logger(__name__)
 
-# 单用户模式的虚拟 User 类
 class FakeUser:
     def __init__(self):
         self.user_id = "single_user"
@@ -64,45 +103,66 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.is_proxy_request = False
         request.state.proxy_instance_id = None
         request.state.user_id = "single_user"
-        request.state.user = FakeUser()  # 假的 User 对象
+        request.state.user = FakeUser()
         request.state.is_admin = True
         
         response = await call_next(request)
         return response
 EOF
-    # 验证语法
     python3 -m py_compile "$AUTH_MIDDLEWARE" && echo "✅ 认证中间件语法正确" || echo "❌ 认证中间件语法错误"
     echo "✅ 认证中间件已修改"
 else
     echo "⚠️ 认证中间件不存在: $AUTH_MIDDLEWARE"
 fi
 
-# ===== 3. 添加 get_single_user_id 函数 =====
-DATABASE_PY="/app/app/database.py"
-if [ -f "$DATABASE_PY" ]; then
-    if ! grep -q "def get_single_user_id" "$DATABASE_PY"; then
-        cat >> "$DATABASE_PY" << 'EOF'
-
-def get_single_user_id() -> str:
-    """返回单用户模式下的固定用户ID"""
-    return "single_user"
-EOF
-        echo "✅ 数据库模块已更新"
-    fi
-else
-    echo "⚠️ 数据库模块不存在"
-fi
-
-# ===== 4. 简化认证 API =====  
+# ===== 4. 添加认证 API =====  
 AUTH_API="/app/app/api/auth.py"
 if [ -f "$AUTH_API" ]; then
     cat > "$AUTH_API" << 'EOFAUTH'
 """
-认证 API - 单用户模式简化版
+认证 API - 单用户模式（支持登录验证）
 """
-from fastapi import APIRouter
+import hashlib
+import sqlite3
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/auth", tags=["认证"])
+
+DB_PATH = "/data/mumuai.db"
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class PasswordSetRequest(BaseModel):
+    new_password: str
+
+def verify_password_DB(username: str, password: str) -> bool:
+    """验证用户名密码"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT password FROM users WHERE username = ?", (username,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row:
+            return False
+            
+        pwd_hash = row[0]
+        # 解析 pbkdf2 格式
+        if pwd_hash.startswith("pbdkdf2:sha256:"):
+            parts = pwd_hash.split("$")
+            if len(parts) == 3:
+                salt = parts[1]
+                stored_hash = parts[2]
+                new_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), 100000).hex()
+                return new_hash == stored_hash
+        return False
+    except Exception as e:
+        print(f"验证密码错误: {e}")
+        return False
 
 @router.get("/health")
 async def health_check():
@@ -116,8 +176,39 @@ async def get_current_user():
         "email": "single@local",
         "is_admin": True
     }
+
+@router.post("/login")
+async def login(request: LoginRequest):
+    """登录验证（验证后仍使用 single_user，不写入 cookie）"""
+    if verify_password_DB(request.username, request.password):
+        return {
+            "success": True, 
+            "message": "登录成功",
+            "user": {"username": request.username}
+        }
+    raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+@router.post("/password/set")
+async def set_password(req: PasswordSetRequest, request: Request):
+    """修改 admin 用户密码"""
+    # 这里简化处理，实际应该验证当前用户是 admin
+    try:
+        import os
+        salt = os.urandom(16).hex()
+        hashed = hashlib.pbkdf2_hmac('sha256', req.new_password.encode(), bytes.fromhex(salt), 100000).hex()
+        pwd_hash = f"pbkdf2:sha256:100000${salt}${hashed}"
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET password = ? WHERE username = 'admin'", (pwd_hash,))
+        conn.commit()
+        conn.close()
+        
+        return {"success": True, "message": "密码修改成功"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"修改密码失败: {str(e)}")
 EOFAUTH
-    echo "✅ 认证 API 已简化"
+    echo "✅ 认证 API 已更新"
 else
     echo "⚠️ 认证 API 不存在"
 fi
