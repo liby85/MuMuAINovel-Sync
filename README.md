@@ -1,18 +1,29 @@
 # MuMuAINovel-Sync
 
-> 🤖 基于官方镜像打补丁，自动生成单用户版本 + SQLite 数据库
+> 🤖 为魔搭空间（ModelScope）部署而改造的单用户版本
 
 ---
 
 ## 📋 项目说明
 
-本项目通过在官方镜像 `mumujie/mumuainovel:latest` 基础上打补丁的方式，生成可用的单用户版本。
+本项目基于 [xiamuceer-j/MuMuAINovel](https://github.com/xiamuceer-j/MuMuAINovel) 原版进行改造，专门适配魔搭空间的部署环境。
+
+### 改造背景
+
+魔搭空间从 Git 仓库构建 Docker 镜像时，**不支持二进制文件**（如 .db 数据库文件）上传。因此本项目采用**运行时生成数据库**的方式：通过 Alembic 迁移脚本在容器启动时自动初始化 SQLite 数据库。
 
 ### 主要功能
 
-- 🔐 **单用户模式** - 自动注入固定用户身份，无需登录
-- 🗄️ **SQLite 数据库** - 预生成数据库，开箱即用
-- ⚙️ **环境变量配置** - 使用官方变量名 APP_PORT / APP_HOST
+- 🔐 **单用户模式** - 内置登录验证（默认账号：admin/admin123）
+- 🗄️ **SQLite 数据库** - 启动时自动初始化
+- ⚙️ **环境变量配置** - 与官方保持一致
+- 📱 **魔搭友好** - 无需上传大文件，直接构建部署
+
+---
+
+## 🙏 致谢
+
+感谢原项目作者 [xiamuceer-j](https://github.com/xiamuceer-j) 的无私付出，本项目仅是对原作品的适配改造。
 
 ---
 
@@ -23,9 +34,9 @@
       ↓
 1. 克隆官方代码 xiamuceer-j/MuMuAINovel
       ↓
-2. 生成 SQLite 数据库（表结构）
+2. 同步 Alembic 迁移文件
       ↓
-3. 保存到 data/mumuai.db
+3. 提交到本项目
       ↓
 用户构建镜像 → 基于官方镜像 + 补丁 + 数据库
 ```
@@ -38,18 +49,21 @@
 .
 ├── Dockerfile                 # 基于官方镜像打补丁
 ├── entrypoint-patch.sh       # 启动时应用补丁脚本
+├── backend/
+│   └── alembic/
+│       └── sqlite/           # SQLite 迁移脚本
 ├── .github/
 │   └── workflows/
-│       └── patch.yml         # 自动生成数据库的工作流
-├── data/
-│   ├── mumuai.db            # 预生成的 SQLite 数据库
-│   └── official_commit      # 官方代码版本记录
+│       ├── sync-alembic.yml  # 同步 Alembic 文件
+│       └── patch.yml         # 构建工作流
 └── README.md
 ```
 
 ---
 
-## 🐳 构建镜像
+## 🐳 构建与部署
+
+### 本地构建
 
 ```bash
 # 构建镜像
@@ -62,9 +76,17 @@ docker run -d \
   -e OPENAI_API_KEY=your_api_key_here \
   mumuainovel-singleuser
 
-# 自定义端口（使用官方变量名）
+# 自定义端口
 docker run -d -p 8080:7860 -e APP_PORT=8080 -e OPENAI_API_KEY=xxx image
 ```
+
+### 魔搭空间部署
+
+1. 将本仓库链接到魔搭空间
+2. 构建镜像会自动执行以下步骤：
+   - 复制 Alembic 迁移文件到镜像
+   - 启动时初始化 SQLite 数据库
+   - 应用单用户补丁
 
 ---
 
@@ -80,31 +102,37 @@ docker run -d -p 8080:7860 -e APP_PORT=8080 -e OPENAI_API_KEY=xxx image
 
 ---
 
+## 🔐 登录说明
+
+### 默认账号
+
+| 用户名 | 密码 |
+|--------|------|
+| admin | admin123 |
+
+### 修改密码
+
+```bash
+curl -X POST http://localhost:7860/api/auth/password/set \
+  -H "Content-Type: application/json" \
+  -d '{"new_password": "your_new_password"}'
+```
+
+---
+
 ## 🤖 GitHub Actions
+
+### 工作流说明
+
+| 工作流 | 功能 |
+|--------|------|
+| `sync-alembic.yml` | 每周自动同步官方 Alembic 迁移文件 |
+| `patch.yml` | 构建时生成数据库（已集成到 Dockerfile） |
 
 ### 触发方式
 
 - **自动**：每周日凌晨 2 点（UTC）检查官方代码更新
 - **手动**：在 Actions 页面点击 "Run workflow"
-
-### 所需 Secrets
-
-| Secret | 用途 |
-|--------|------|
-| `DOCKER_USERNAME` | Docker Hub 用户名（用于拉取官方镜像） |
-| `DOCKER_TOKEN` | Docker Hub 访问令牌 |
-
----
-
-## 🔐 单用户化修改内容
-
-entrypoint-patch.sh 自动应用以下修改：
-
-- 认证中间件 → 始终注入 `user_id="single_user"`
-- 认证 API → 简化为仅保留健康检查
-- 配置文件 → `LOCAL_AUTH_ENABLED=false`
-- 启动脚本 → 移除数据库迁移
-- 前端 → 移除登录页面
 
 ---
 
@@ -114,4 +142,12 @@ GPL-3.0 - 与原项目一致
 
 ---
 
-> 🤖 此项目由 AI 协作开发维护
+## ⚠️ 注意事项
+
+1. 首次启动时数据库会自动初始化（约几秒钟）
+2. 如需迁移数据，请备份 `/data/mumuai.db` 文件
+3. 修改密码后请妥善保管，忘记密码需要重建数据库
+
+---
+
+> 🤖 此项目由 AI 协作开发维护 | 感谢原作者的开源贡献
