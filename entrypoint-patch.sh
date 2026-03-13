@@ -6,6 +6,16 @@ set -e
 
 echo "🔧 应用单用户模式补丁..."
 
+# ===== 0. 检查并修复数据库文件 =====
+DATABASE_FILE="/app/data/mumuai.db"
+if [ -f "$DATABASE_FILE" ]; then
+    chmod 666 "$DATABASE_FILE"
+    echo "✅ 数据库文件已就绪: $DATABASE_FILE"
+else
+    echo "❌ 错误: 数据库文件不存在 - $DATABASE_FILE"
+    exit 1
+fi
+
 # ===== 1. 修改认证中间件 =====
 AUTH_MIDDLEWARE="/app/backend/app/middleware/auth_middleware.py"
 if [ -f "$AUTH_MIDDLEWARE" ]; then
@@ -84,11 +94,8 @@ fi
 # ===== 6. 前端修改（移除登录相关）=====
 FRONTEND_DIR="/app/frontend/dist"
 if [ -d "$FRONTEND_DIR" ]; then
-    # 移除登录相关路由/页面
     rm -rf "$FRONTEND_DIR/login" 2>/dev/null || true
     rm -f "$FRONTEND_DIR/login.html" 2>/dev/null || true
-    
-    # 修改 index.html 中的路由（如果需要）
     if [ -f "$FRONTEND_DIR/index.html" ]; then
         sed -i 's|"/login"|"/"|g' "$FRONTEND_DIR/index.html" 2>/dev/null || true
     fi
@@ -98,5 +105,4 @@ fi
 echo "✅ 所有补丁已应用完成！"
 echo "🚀 启动应用..."
 
-# 执行原始命令
 exec "$@"

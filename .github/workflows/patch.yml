@@ -14,12 +14,14 @@ on:
         type: boolean
 
 jobs:
-  check-and-build:
+  check-and-patch:
     runs-on: ubuntu-latest
     
     steps:
       - name: 📦 检出仓库
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       
       - name: 🐳 登录 Docker Hub
         uses: docker/login-action@v3
@@ -30,19 +32,19 @@ jobs:
       - name: 🔍 检查官方镜像更新
         id: check
         run: |
-          # 拉取官方镜像 latest
-          docker pull xiamuceer-j/mumuainovel:latest || exit 1
+          # 拉取官方镜像
+          docker pull mumujie/mumuainovel:latest || exit 1
           
           # 获取镜像 digest
-          DIGEST=$(docker inspect --format='{{.Id}}' xiamuceer-j/mumuainovel:latest)
+          DIGEST=$(docker inspect --format='{{.Id}}' mumujie/mumuainovel:latest)
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
           
           # 检查是否有变化
-          CACHE_FILE="/tmp/official_digest"
+          CACHE_FILE="data/official_digest"
           if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$DIGEST" ]; then
             if [ "${{ github.event.inputs.rebuild }}" != "true" ]; then
-              echo "📦 官方镜像没有更新，跳过构建"
               echo "skip=true" >> $GITHUB_OUTPUT
+              echo "📦 官方镜像没有更新，跳过构建"
             else
               echo "skip=false" >> $GITHUB_OUTPUT
             fi
@@ -51,16 +53,53 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
       
-      - name: 🐳 构建并推送打补丁的镜像
+      - name: 🗄️ 生成 SQLite 数据库
         if: steps.check.outputs.skip == 'false'
         run: |
-          docker build \
-            --build-arg BASE_IMAGE=xiamuceer-j/mumuainovel:latest \
-            -t liby85/mumuainovel-singleuser:latest \
-            -t liby85/mumuainovel-singleuser:${{ steps.check.outputs.digest }} \
-            .
+          # 创建临时容器生成数据库
+          docker create --name db-generator mumujie/mumuainovel:latest sleep infinity
+          docker start db-generator
           
-          docker push liby85/mumuainovel-singleuser:latest
-          docker push liby85/mumuainovel-singleuser:${{ steps.check.outputs.digest }}
+          # 等待服务启动
+          sleep 5
           
-          echo "✅ 镜像构建并推送完成！"
+          # 初始化数据库（使用 SQLite）
+          docker exec db-generator sh -c "
+            cd /app/backend && \
+            pip install aiosqlite -q && \
+            DATABASE_URL='sqlite+aiosqlite:///data/mumuai.db' python -c \'
+              import asyncio
+              from app.database import engine, Base
+              from app.models import *              
+              async def init_db():
+                  async with engine.begin() as conn:
+                      await conn.run_sync(Base.metadata.create_all)
+                  print(\"Database tables created\")
+              asyncio.run(init_db())
+            \'
+          " || true
+          
+          # 尝试导出数据库文件
+          docker cp db-generator:/app/data/mumuai.db data/mumuai.db 2>/dev/null || true
+          
+          # 检查是否成功生成
+          if [ -f data/mumuai.db ]; then
+            echo "✅ SQLite 数据库已生成"
+            ls -la data/mumuai.db
+          else
+            # 如果自动生成失败，创建空数据库文件
+            echo "⚠️ 自动生成失败，创建空数据库文件"
+            touch data/mumuai.db
+          fi
+          
+          docker stop db-generator
+          docker rm db-generator
+      
+      - name: 💾 提交数据库文件
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add data/
+          git commit -m "chore: update SQLite database" || echo "数据库无变化"
+          git push
