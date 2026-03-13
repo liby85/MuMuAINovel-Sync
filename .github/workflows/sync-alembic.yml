@@ -1,0 +1,85 @@
+name: 📥 Sync Alembic Files from Upstream
+
+on:
+  schedule:
+    # 每周日凌晨 2 点自动检查更新
+    - cron: '0 2 * * 0'
+  
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '强制同步'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  UPSTREAM_REPO: xiamuceer-j/MuMuAINovel
+
+jobs:
+  sync-alembic:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📦 检出仓库
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 📥 克隆官方代码库
+        run: |
+          git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git upstream-code
+          cd upstream-code
+          NEW_COMMIT=$(git rev-parse HEAD)
+          echo "$NEW_COMMIT" > ../data/official_commit_new
+          echo "📦 已克隆官方代码: $(git rev-parse --short HEAD)"
+      
+      - name: 🔍 检查官方代码更新
+        id: check
+        run: |
+          CURRENT_COMMIT=$(cat data/official_commit 2>/dev/null || echo "")
+          NEW_COMMIT=$(cat data/official_commit_new)
+          
+          echo "当前版本: $CURRENT_COMMIT"
+          echo "最新版本: $NEW_COMMIT"
+          
+          if [ "$CURRENT_COMMIT" = "$NEW_COMMIT" ] && [ "${{ github.event.inputs.force_rebuild }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "📦 官方代码无更新，跳过同步"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "🔄 检测到官方代码有更新"
+          fi
+      
+      - name: 📂 复制 alembic 文件
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          mkdir -p backend/alembic/sqlite/versions
+          
+          # 复制 alembic 配置
+          cp upstream-code/backend/alembic-sqlite.ini backend/
+          
+          # 复制 sqlite 迁移脚本
+          cp upstream-code/backend/alembic/sqlite/env.py backend/alembic/sqlite/
+          cp upstream-code/backend/alembic/sqlite/script.py.mako backend/alembic/sqlite/
+          cp upstream-code/backend/alembic/sqlite/versions/*.py backend/alembic/sqlite/versions/
+          
+          echo "✅ alembic 文件已复制"
+          ls -la backend/
+          ls -la backend/alembic/sqlite/
+      
+      - name: 📝 提交更新
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          
+          git add backend/
+          
+          if git diff --staged --quiet; then
+            echo "📦 alembic 文件无变化，无需提交"
+          else
+            git commit -m "sync: update alembic files from upstream"
+            git push
+            echo "✅ alembic 文件已更新并推送"
+          fi
