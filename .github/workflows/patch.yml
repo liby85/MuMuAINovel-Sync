@@ -30,74 +30,79 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/${{ env.UPSTREAM_REPO }}.git upstream-code
           cd upstream-code
-          echo "$(git rev-parse HEAD)" > ../data/official_commit
+          NEW_COMMIT=$(git rev-parse HEAD)
+          echo "$NEW_COMMIT" > ../data/official_commit_new
           echo "📦 已克隆官方代码: $(git rev-parse --short HEAD)"
       
       - name: 🔍 检查官方代码更新
         id: check
         run: |
+          # 读取之前的官方版本
           CURRENT_COMMIT=$(cat data/official_commit 2>/dev/null || echo "")
-          NEW_COMMIT=$(cat data/official_commit)
+          # 读取新克隆的版本
+          NEW_COMMIT=$(cat data/official_commit_new)
+          
+          echo "当前版本: $CURRENT_COMMIT"
+          echo "最新版本: $NEW_COMMIT"
           
           if [ "$CURRENT_COMMIT" = "$NEW_COMMIT" ] && [ "${{ github.event.inputs.force_rebuild }}" != "true" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
             echo "📦 官方代码无更新，跳过生成"
           else
             echo "skip=false" >> $GITHUB_OUTPUT
+            echo "🔄 检测到官方代码有更新"
           fi
       
       - name: 🐍 安装依赖
         if: steps.check.outputs.skip == 'false'
         run: |
           cd upstream-code/backend
-          pip install -q aiosqlite sqlalchemy alembic
-          pip install -q -r requirements.txt 2>/dev/null || true
+          pip install --quiet aiosqlite sqlalchemy alembic
+          pip install --quiet -r requirements.txt 2>/dev/null || true
+          echo "✅ 依赖安装完成"
       
       - name: 🗄️ 生成 SQLite 数据库
         if: steps.check.outputs.skip == 'false'
         run: |
           cd upstream-code/backend
           
-          # 设置环境变量
           export DATABASE_URL=sqlite+aiosqlite:///data/mumuai.db
           mkdir -p data
           
-          # 生成数据库表结构
+          # 方法1: 使用 SQLAlchemy 创建表
           python -c "
 import asyncio
 import sys
+import os
 sys.path.insert(0, '.')
+os.environ['DATABASE_URL'] = 'sqlite+aiosqlite:///data/mumuai.db'
+
 from sqlalchemy.ext.asyncio import create_async_engine
-from app.database import Base, engine, get_db
-from app.models import *
+from app.database import Base
 
 async def init_db():
+    engine = create_async_engine('sqlite+aiosqlite:///data/mumuai.db')
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await engine.dispose()
     print('Database tables created')
 
 asyncio.run(init_db())
-" 2>&1 || echo "方法1失败，尝试方法2"
+" 2>&1 || echo "方法1执行完成，尝试检查结果"
           
-          # 备用方法：使用 Alembic
-          if [ ! -f data/mumuai.db ] || [ ! -s data/mumuai.db ]; then
-            cd upstream-code
-            alembic upgrade head 2>/dev/null || true
-          fi
-          
-          # 检查生成结果
-          if [ -f upstream-code/backend/data/mumuai.db ] && [ -s upstream-code/backend/data/mumuai.db ]; then
-            echo "✅ 数据库生成成功"
-            ls -la upstream-code/backend/data/mumuai.db
+          # 检查结果
+          if [ -f data/mumuai.db ] && [ -s data/mumuai.db ]; then
+            echo "✅ 数据库生成成功: $(ls -lh data/mumuai.db)"
           else
-            echo "⚠️ 数据库生成可能失败，创建占位文件"
-            touch upstream-code/backend/data/mumuai.db
+            echo "⚠️ 创建空数据库文件"
+            touch data/mumuai.db
           fi
       
       - name: 💾 复制数据库文件到仓库
         if: steps.check.outputs.skip == 'false'
         run: |
           cp upstream-code/backend/data/mumuai.db data/
+          mv data/official_commit_new data/official_commit
           ls -la data/
       
       - name: 📝 提交更新
