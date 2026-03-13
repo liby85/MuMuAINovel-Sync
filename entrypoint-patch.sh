@@ -40,6 +40,23 @@ from app.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 单用户模式的虚拟 User 类
+class FakeUser:
+    def __init__(self):
+        self.user_id = "single_user"
+        self.username = "single_user"
+        self.email = "single@local"
+        self.is_admin = True
+        self.trust_level = 1
+        self.created_at = None
+    def dict(self):
+        return {
+            "user_id": self.user_id,
+            "username": self.username,
+            "email": self.email,
+            "is_admin": self.is_admin
+        }
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """认证中间件（单用户模式）"""
     
@@ -47,7 +64,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.is_proxy_request = False
         request.state.proxy_instance_id = None
         request.state.user_id = "single_user"
-        request.state.user = None
+        request.state.user = FakeUser()  # 假的 User 对象
         request.state.is_admin = True
         
         response = await call_next(request)
@@ -117,7 +134,7 @@ fi
 echo "✅ 所有补丁已应用完成！"
 echo "🚀 启动应用 (端口: $APP_PORT)..."
 
-# 启动应用（直接指定参数，不使用 exec "$@"）
+# 启动应用
 cd /app
 exec uvicorn app.main:app \
     --host "${APP_HOST:-0.0.0.0}" \
