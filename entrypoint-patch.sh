@@ -9,18 +9,18 @@ echo "🔧 应用单用户模式补丁..."
 # ===== 0. 配置环境变量（使用官方变量名）=====
 export APP_PORT=${APP_PORT:-7860}
 export APP_HOST=${APP_HOST:-0.0.0.0}
-export DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///data/mumuai.db}
+export DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:////data/mumuai.db}
 export LOCAL_AUTH_ENABLED=${LOCAL_AUTH_ENABLED:-false}
 
 echo "📌 配置: APP_PORT=$APP_PORT, APP_HOST=$APP_HOST"
 echo "📌 数据库: $DATABASE_URL"
 
 # ===== 1. 检查并配置数据库 =====
-DATABASE_FILE="/app/data/mumuai.db"
+DATABASE_FILE="/data/mumuai.db"
 if [ -f "$DATABASE_FILE" ]; then
     chmod 666 "$DATABASE_FILE"
     echo "✅ 数据库文件已就绪: $DATABASE_FILE"
-    mkdir -p /app/data
+    mkdir -p /data
 else
     echo "❌ 错误: 数据库文件不存在 - $DATABASE_FILE"
     exit 1
@@ -114,18 +114,14 @@ if [ -f "$CONFIG_PY" ]; then
     echo "✅ 配置文件已更新"
 fi
 
-# ===== 6. 修改启动脚本 =====
-ENTRYPOINT_SH="/app/entrypoint.sh"
-if [ -f "$ENTRYPOINT_SH" ]; then
-    sed -i '/等待数据库/d' "$ENTRYPOINT_SH" 2>/dev/null || true
-    sed -i '/alembic upgrade/d' "$ENTRYPOINT_SH" 2>/dev/null || true
-    sed -i '/数据库迁移/d' "$ENTRYPOINT_SH" 2>/dev/null || true
-    sed -i '/postgresql/d' "$ENTRYPOINT_SH" 2>/dev/null || true
-    sed -i '/pg_isready/d' "$ENTRYPOINT_SH" 2>/dev/null || true
-    echo "✅ 启动脚本已更新"
-fi
-
 echo "✅ 所有补丁已应用完成！"
 echo "🚀 启动应用 (端口: $APP_PORT)..."
 
-exec "$@"
+# 启动应用（直接指定参数，不使用 exec "$@"）
+cd /app
+exec uvicorn app.main:app \
+    --host "${APP_HOST:-0.0.0.0}" \
+    --port "${APP_PORT:-7860}" \
+    --log-level info \
+    --access-log \
+    --use-colors
