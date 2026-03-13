@@ -6,7 +6,7 @@ set -e
 
 echo "🔧 应用单用户模式补丁..."
 
-# ===== 0. 配置环境变量（使用官方变量名）=====
+# ===== 0. 配置环境变量 =====
 export APP_PORT=${APP_PORT:-7860}
 export APP_HOST=${APP_HOST:-0.0.0.0}
 export DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:////data/mumuai.db}
@@ -15,15 +15,18 @@ export LOCAL_AUTH_ENABLED=${LOCAL_AUTH_ENABLED:-false}
 echo "📌 配置: APP_PORT=$APP_PORT, APP_HOST=$APP_HOST"
 echo "📌 数据库: $DATABASE_URL"
 
-# ===== 1. 检查并配置数据库 =====
-DATABASE_FILE="/data/mumuai.db"
-if [ -f "$DATABASE_FILE" ]; then
-    chmod 666 "$DATABASE_FILE"
-    echo "✅ 数据库文件已就绪: $DATABASE_FILE"
-    mkdir -p /data
+# ===== 1. 初始化数据库 =====
+DB_FILE="/data/mumuai.db"
+mkdir -p /data
+
+if [ -f "$DB_FILE" ]; then
+    echo "✅ 数据库文件已存在: $DB_FILE"
 else
-    echo "❌ 错误: 数据库文件不存在 - $DATABASE_FILE"
-    exit 1
+    echo "📦 初始化数据库..."
+    cd /app/backend
+    alembic -c alembic-sqlite.ini upgrade head
+    chmod 666 "$DB_FILE"
+    echo "✅ 数据库初始化完成"
 fi
 
 # ===== 2. 确保 admin 用户存在 =====
@@ -36,23 +39,18 @@ db_path = "/data/mumuai.db"
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
 
-# 检查 users 表是否存在
 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
 if not cursor.fetchone():
-    print("⚠️ users 表不存在，跳过创建 admin 用户")
+    print("⚠️ users 表不存在")
     conn.close()
     exit(0)
 
-# 检查 admin 用户是否已存在
 cursor.execute("SELECT user_id FROM users WHERE username = 'admin'")
 if cursor.fetchone():
     print("ℹ️ admin 用户已存在")
 else:
-    # 创建 admin 用户（默认密码: admin123）
-    # 密码使用 PBKDF2 格式: pbkdf2:sha256:Iterations$salt$hash
     password = "admin123"
     salt = os.urandom(16).hex()
-    import hashlib
     hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt), 100000).hex()
     pwd_hash = f"pbkdf2:sha256:100000${salt}${hashed}"
     
@@ -66,8 +64,7 @@ else:
 conn.close()
 PYEOF
 
-# ===== 3. 修改认证中间件 =====  
-# 路径: /app/app/middleware/auth_middleware.py
+# ===== 3. 修改认证中间件 =====
 AUTH_MIDDLEWARE="/app/app/middleware/auth_middleware.py"
 if [ -f "$AUTH_MIDDLEWARE" ]; then
     cat > "$AUTH_MIDDLEWARE" << 'EOF'
@@ -97,8 +94,6 @@ class FakeUser:
         }
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """认证中间件（单用户模式）"""
-    
     async def dispatch(self, request: Request, call_next):
         request.state.is_proxy_request = False
         request.state.proxy_instance_id = None
@@ -112,10 +107,10 @@ EOF
     python3 -m py_compile "$AUTH_MIDDLEWARE" && echo "✅ 认证中间件语法正确" || echo "❌ 认证中间件语法错误"
     echo "✅ 认证中间件已修改"
 else
-    echo "⚠️ 认证中间件不存在: $AUTH_MIDDLEWARE"
+    echo "⚠️ 认证中间件不存在"
 fi
 
-# ===== 4. 添加认证 API =====  
+# ===== 4. 添加认证 API =====
 AUTH_API="/app/app/api/auth.py"
 if [ -f "$AUTH_API" ]; then
     cat > "$AUTH_API" << 'EOFAUTH'
@@ -139,7 +134,6 @@ class PasswordSetRequest(BaseModel):
     new_password: str
 
 def verify_password_DB(username: str, password: str) -> bool:
-    """验证用户名密码"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -151,8 +145,7 @@ def verify_password_DB(username: str, password: str) -> bool:
             return False
             
         pwd_hash = row[0]
-        # 解析 pbkdf2 格式
-        if pwd_hash.startswith("pbdkdf2:sha256:"):
+        if pwd_hash.startswith("pbkdf2:sha256:"):
             parts = pwd_hash.split("$")
             if len(parts) == 3:
                 salt = parts[1]
@@ -179,19 +172,12 @@ async def get_current_user():
 
 @router.post("/login")
 async def login(request: LoginRequest):
-    """登录验证（验证后仍使用 single_user，不写入 cookie）"""
     if verify_password_DB(request.username, request.password):
-        return {
-            "success": True, 
-            "message": "登录成功",
-            "user": {"username": request.username}
-        }
+        return {"success": True, "message": "登录成功", "user": {"username": request.username}}
     raise HTTPException(status_code=401, detail="用户名或密码错误")
 
 @router.post("/password/set")
 async def set_password(req: PasswordSetRequest, request: Request):
-    """修改 admin 用户密码"""
-    # 这里简化处理，实际应该验证当前用户是 admin
     try:
         import os
         salt = os.urandom(16).hex()
@@ -209,8 +195,6 @@ async def set_password(req: PasswordSetRequest, request: Request):
         raise HTTPException(status_code=500, detail=f"修改密码失败: {str(e)}")
 EOFAUTH
     echo "✅ 认证 API 已更新"
-else
-    echo "⚠️ 认证 API 不存在"
 fi
 
 # ===== 5. 修改配置文件 =====
